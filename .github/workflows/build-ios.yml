@@ -39,6 +39,15 @@ jobs:
           test -s prod.keys
           echo "prod.keys created successfully"
 
+      - name: Debug prod.keys location
+        run: |
+          echo "Current directory:"
+          pwd
+          echo "Checking prod.keys:"
+          ls -l prod.keys
+          echo "Searching repository:"
+          find . -name 'prod.keys' -print
+
       - name: Build IPA
         run: ./make-ios.sh --ipa
 
