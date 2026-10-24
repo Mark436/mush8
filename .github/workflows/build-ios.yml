@@ -1,8 +1,13 @@
-
 name: Mush8 - Compilar IPA iOS
 
 on:
   workflow_dispatch:
+    inputs:
+      reuse_run_id:
+        description: "ID de ejecución anterior para reutilizar NSP (vacío = descargar del VPS)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -22,7 +27,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Descargar archivos desde el VPS
+      - name: Intentar recuperar artefactos anteriores
+        if: ${{ inputs.reuse_run_id != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: mush8-build-inputs-${{ inputs.reuse_run_id }}
+          path: cached-inputs
+          run-id: ${{ inputs.reuse_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+
+      - name: Obtener archivos del artefacto o del VPS
         env:
           TRANSFER_USER: ${{ secrets.TRANSFER_USER }}
           TRANSFER_PASS: ${{ secrets.TRANSFER_PASS }}
@@ -30,38 +46,57 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          umask 077
+
           mkdir -p downloads
 
-          if [[ -z "$TRANSFER_USER" || -z "$TRANSFER_PASS" || -z "$TRANSFER_BASE_URL" ]]; then
-            echo "::error::Falta configurar los secretos de transferencia."
-            exit 1
-          fi
+          if [[ -s cached-inputs/base.nsp ]] &&
+             [[ -s cached-inputs/upd4-0-1.nsp ]] &&
+             [[ -s cached-inputs/dlc.nsp ]]; then
 
-          for file in baseGame.nsp update401.nsp dlc.nsp; do
-            echo "::group::Descargando $file"
+            echo "Reutilizando los archivos de una ejecución anterior."
 
-            curl \
-              --fail \
-              --silent \
-              --show-error \
-              --location \
-              --connect-timeout 30 \
-              --max-time 7200 \
-              --retry 2 \
-              --retry-delay 5 \
-              --user "$TRANSFER_USER:$TRANSFER_PASS" \
-              --output "downloads/$file" \
-              "${TRANSFER_BASE_URL%/}/$file"
+            cp cached-inputs/base.nsp downloads/baseGame.nsp
+            cp cached-inputs/upd4-0-1.nsp downloads/update401.nsp
+            cp cached-inputs/dlc.nsp downloads/dlc.nsp
+          else
+            echo "Artefacto anterior no disponible. Descargando del VPS."
 
-            if [[ ! -s "downloads/$file" ]]; then
-              echo "::error::Archivo vacío: $file"
+            rm -rf downloads
+            mkdir -p downloads
+
+            if [[ -z "$TRANSFER_USER" ||
+                  -z "$TRANSFER_PASS" ||
+                  -z "$TRANSFER_BASE_URL" ]]; then
+              echo "::error::Faltan los secretos de transferencia."
               exit 1
             fi
 
-            echo "Descarga correcta: $file"
-            ls -lh "downloads/$file"
-            echo "::endgroup::"
-          done
+            for file in baseGame.nsp update401.nsp dlc.nsp; do
+              echo "::group::Descargando $file"
+
+              curl \
+                --fail \
+                --silent \
+                --show-error \
+                --location \
+                --connect-timeout 30 \
+                --max-time 7200 \
+                --retry 2 \
+                --retry-delay 5 \
+                --user "$TRANSFER_USER:$TRANSFER_PASS" \
+                --output "downloads/$file" \
+                "${TRANSFER_BASE_URL%/}/$file"
+
+              if [[ ! -s "downloads/$file" ]]; then
+                echo "::error::Archivo vacío: $file"
+                exit 1
+              fi
+
+              ls -lh "downloads/$file"
+              echo "::endgroup::"
+            done
+          fi
 
       - name: Verificar SHA-256
         env:
@@ -116,7 +151,7 @@ jobs:
 
           echo "Archivos verificados y preparados."
 
-      - name: Guardar entradas temporalmente para compilar
+      - name: Guardar archivos para reutilización
         uses: actions/upload-artifact@v4
         with:
           name: mush8-build-inputs-${{ github.run_id }}
@@ -125,11 +160,11 @@ jobs:
           retention-days: 1
           compression-level: 0
 
-      - name: Limpiar archivos descargados
+      - name: Limpiar archivos locales de preparación
         if: always()
         shell: bash
         run: |
-          rm -rf downloads build-inputs
+          rm -rf downloads build-inputs cached-inputs
 
   build:
     name: Compilar y publicar IPA
@@ -234,38 +269,6 @@ jobs:
           path: build/Mush8.ipa
           if-no-files-found: error
           retention-days: 7
-
-      - name: Eliminar artefacto intermedio de NSP
-        if: success()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const artifactName = `mush8-build-inputs-${context.runId}`;
-
-            const result = await github.rest.actions.listWorkflowRunArtifacts({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: context.runId,
-              per_page: 100
-            });
-
-            const artifacts = result.data.artifacts.filter(
-              artifact => artifact.name === artifactName
-            );
-
-            for (const artifact of artifacts) {
-              await github.rest.actions.deleteArtifact({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                artifact_id: artifact.id
-              });
-
-              core.info(`Artefacto intermedio eliminado: ${artifact.name}`);
-            }
-
-            if (artifacts.length === 0) {
-              core.info('No queda ningún artefacto intermedio con ese nombre.');
-            }
 
       - name: Limpiar archivos locales y claves
         if: always()
