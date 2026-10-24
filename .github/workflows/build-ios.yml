@@ -1,3 +1,4 @@
+
 name: Mush8 - Compilar IPA iOS
 
 on:
@@ -20,7 +21,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-
       - name: Descargar archivos desde el VPS
         env:
           TRANSFER_USER: ${{ secrets.TRANSFER_USER }}
@@ -42,9 +42,13 @@ jobs:
             output="downloads/$file"
             rm -f "$output"
 
+            echo "=========================================="
+            echo "Archivo: $file"
+            echo "Iniciando descarga desde el VPS..."
+            echo "=========================================="
+
             curl \
               --fail \
-              --silent \
               --show-error \
               --location \
               --connect-timeout 30 \
@@ -52,23 +56,24 @@ jobs:
               --retry 2 \
               --retry-delay 5 \
               --user "$TRANSFER_USER:$TRANSFER_PASS" \
+              --progress-bar \
               --output "$output" \
+              --write-out $'\n\nResultado de descarga:\n  HTTP: %{http_code}\n  Recibido: %{size_download} bytes\n  Velocidad media: %{speed_download} bytes/s\n  Tiempo total: %{time_total} segundos\n' \
               "${TRANSFER_BASE_URL%/}/$file"
 
-            if [[ ! -f "$output" ]]; then
-              echo "::error::No se creó el archivo $file."
-              exit 1
-            fi
-
-            size="$(stat -f%z "$output")"
-            echo "Tamaño real recibido: $size bytes"
-
-            if [[ "$size" -le 0 ]]; then
+            if [[ ! -s "$output" ]]; then
               echo "::error::El servidor devolvió un archivo vacío: $file"
               exit 1
             fi
 
-            echo "Descarga correcta: $file"
+            size="$(stat -f%z "$output")"
+            size_mb="$(awk -v s="$size" 'BEGIN {printf "%.2f", s/1048576}')"
+
+            echo "=========================================="
+            echo "Descarga completada: $file"
+            echo "Tamaño final: $size bytes ($size_mb MiB)"
+            echo "=========================================="
+
             echo "::endgroup::"
           done
 
