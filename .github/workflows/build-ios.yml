@@ -20,7 +20,7 @@ jobs:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Descargar NSP desde el VPS
+      - name: Descargar archivos desde el VPS
         env:
           TRANSFER_USER: ${{ secrets.TRANSFER_USER }}
           TRANSFER_PASS: ${{ secrets.TRANSFER_PASS }}
@@ -30,7 +30,7 @@ jobs:
           set -euo pipefail
           mkdir -p downloads
 
-          for file in baseGame.nsp update401.nsp; do
+          for file in baseGame.nsp update401.nsp dlc.nsp; do
             echo "::group::Descargando $file"
 
             curl \
@@ -56,6 +56,7 @@ jobs:
         env:
           SHA256_BASEGAME: ${{ secrets.SHA256_BASEGAME }}
           SHA256_UPDATE401: ${{ secrets.SHA256_UPDATE401 }}
+          SHA256_DLC: ${{ secrets.SHA256_DLC }}
         shell: bash
         run: |
           set -euo pipefail
@@ -82,6 +83,7 @@ jobs:
 
           verify_sha256 baseGame.nsp "$SHA256_BASEGAME"
           verify_sha256 update401.nsp "$SHA256_UPDATE401"
+          verify_sha256 dlc.nsp "$SHA256_DLC"
 
       - name: Preparar archivos del juego y claves
         env:
@@ -106,9 +108,11 @@ jobs:
 
           cp downloads/baseGame.nsp base.nsp
           cp downloads/update401.nsp upd4-0-1.nsp
+          cp downloads/dlc.nsp dlc.nsp
 
           test -s base.nsp
           test -s upd4-0-1.nsp
+          test -s dlc.nsp
 
           echo "Archivos preparados correctamente."
 
@@ -152,11 +156,10 @@ jobs:
           ./make-ios.sh --ipa
 
           if [[ ! -s build/Mush8.ipa ]]; then
-            echo "::error::La compilación terminó sin generar build/Mush8.ipa."
+            echo "::error::No se generó build/Mush8.ipa."
             exit 1
           fi
 
-          echo "IPA generado correctamente:"
           ls -lh build/Mush8.ipa
 
       - name: Publicar IPA
@@ -167,10 +170,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Limpiar claves y archivos descargados
+      - name: Limpiar archivos sensibles y descargados
         if: always()
         shell: bash
         run: |
           rm -f prod.keys
-          rm -f base.nsp upd4-0-1.nsp
+          rm -f base.nsp upd4-0-1.nsp dlc.nsp
           rm -rf downloads
