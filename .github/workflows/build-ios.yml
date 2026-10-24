@@ -20,8 +20,9 @@ concurrency:
 jobs:
   prepare:
     name: Descargar y verificar archivos
-    runs-on: macos-26
-    timeout-minutes: 180
+    # Solo hace curl/sha256/cp: no necesita macOS (que cuesta 10x en minutos).
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
       - name: Checkout
@@ -56,47 +57,59 @@ jobs:
 
             echo "Reutilizando los archivos de una ejecución anterior."
 
-            cp cached-inputs/base.nsp downloads/baseGame.nsp
-            cp cached-inputs/upd4-0-1.nsp downloads/update401.nsp
-            cp cached-inputs/dlc.nsp downloads/dlc.nsp
-          else
-            echo "Artefacto anterior no disponible. Descargando del VPS."
+            mv cached-inputs/base.nsp downloads/baseGame.nsp
+            mv cached-inputs/upd4-0-1.nsp downloads/update401.nsp
+            mv cached-inputs/dlc.nsp downloads/dlc.nsp
+            exit 0
+          fi
 
-            rm -rf downloads
-            mkdir -p downloads
+          echo "Artefacto anterior no disponible. Descargando del VPS."
 
-            if [[ -z "$TRANSFER_USER" ||
-                  -z "$TRANSFER_PASS" ||
-                  -z "$TRANSFER_BASE_URL" ]]; then
-              echo "::error::Faltan los secretos de transferencia."
+          rm -rf downloads
+          mkdir -p downloads
+
+          if [[ -z "$TRANSFER_USER" ||
+                -z "$TRANSFER_PASS" ||
+                -z "$TRANSFER_BASE_URL" ]]; then
+            echo "::error::Faltan los secretos de transferencia."
+            exit 1
+          fi
+
+          if [[ "$TRANSFER_BASE_URL" != https://* ]]; then
+            echo "::error::TRANSFER_BASE_URL debe usar https."
+            exit 1
+          fi
+
+          # Credenciales en un archivo temporal (no en la lista de procesos)
+          curl_config="$(mktemp)"
+          trap 'rm -f "$curl_config"' EXIT
+          printf 'user = "%s:%s"\n' "$TRANSFER_USER" "$TRANSFER_PASS" > "$curl_config"
+
+          for file in baseGame.nsp update401.nsp dlc.nsp; do
+            echo "::group::Descargando $file"
+
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --location \
+              --proto '=https' \
+              --connect-timeout 30 \
+              --max-time 7200 \
+              --retry 2 \
+              --retry-delay 5 \
+              --config "$curl_config" \
+              --output "downloads/$file" \
+              "${TRANSFER_BASE_URL%/}/$file"
+
+            if [[ ! -s "downloads/$file" ]]; then
+              echo "::error::Archivo vacío: $file"
               exit 1
             fi
 
-            for file in baseGame.nsp update401.nsp dlc.nsp; do
-              echo "::group::Descargando $file"
-
-              curl \
-                --fail \
-                --silent \
-                --show-error \
-                --location \
-                --connect-timeout 30 \
-                --max-time 7200 \
-                --retry 2 \
-                --retry-delay 5 \
-                --user "$TRANSFER_USER:$TRANSFER_PASS" \
-                --output "downloads/$file" \
-                "${TRANSFER_BASE_URL%/}/$file"
-
-              if [[ ! -s "downloads/$file" ]]; then
-                echo "::error::Archivo vacío: $file"
-                exit 1
-              fi
-
-              ls -lh "downloads/$file"
-              echo "::endgroup::"
-            done
-          fi
+            ls -lh "downloads/$file"
+            echo "::endgroup::"
+          done
 
       - name: Verificar SHA-256
         env:
@@ -117,7 +130,7 @@ jobs:
               exit 1
             fi
 
-            actual="$(shasum -a 256 "downloads/$file" | awk '{print $1}')"
+            actual="$(sha256sum "downloads/$file" | awk '{print $1}')"
             actual="$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')"
             expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
 
@@ -141,9 +154,9 @@ jobs:
 
           mkdir -p build-inputs
 
-          cp downloads/baseGame.nsp build-inputs/base.nsp
-          cp downloads/update401.nsp build-inputs/upd4-0-1.nsp
-          cp downloads/dlc.nsp build-inputs/dlc.nsp
+          mv downloads/baseGame.nsp build-inputs/base.nsp
+          mv downloads/update401.nsp build-inputs/upd4-0-1.nsp
+          mv downloads/dlc.nsp build-inputs/dlc.nsp
 
           test -s build-inputs/base.nsp
           test -s build-inputs/upd4-0-1.nsp
@@ -171,6 +184,10 @@ jobs:
     needs: prepare
     runs-on: macos-26
     timeout-minutes: 360
+
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
 
     steps:
       - name: Checkout
@@ -206,13 +223,14 @@ jobs:
           test -s build-inputs/upd4-0-1.nsp
           test -s build-inputs/dlc.nsp
 
-          cp build-inputs/base.nsp base.nsp
-          cp build-inputs/upd4-0-1.nsp upd4-0-1.nsp
-
           mkdir -p game-files
-          cp build-inputs/base.nsp game-files/base.nsp
-          cp build-inputs/upd4-0-1.nsp game-files/upd4-0-1.nsp
-          cp build-inputs/dlc.nsp game-files/dlc.nsp
+          mv build-inputs/base.nsp game-files/base.nsp
+          mv build-inputs/upd4-0-1.nsp game-files/upd4-0-1.nsp
+          mv build-inputs/dlc.nsp game-files/dlc.nsp
+
+          # Hard links: los archivos que el script espera en la raíz, sin duplicar disco
+          ln game-files/base.nsp base.nsp
+          ln game-files/upd4-0-1.nsp upd4-0-1.nsp
 
           echo "Archivos preparados."
           ls -lh base.nsp upd4-0-1.nsp game-files/
@@ -222,7 +240,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          xcode-select -p
           xcodebuild -version
+          echo "Versiones de Xcode instaladas en el runner:"
+          ls -d /Applications/Xcode*.app || true
+
           sudo xcodebuild -license accept
 
           brew install xcodegen cmake pkgconf rustup
@@ -250,7 +272,36 @@ jobs:
           set -euo pipefail
 
           chmod +x make-ios.sh
-          ./make-ios.sh --ipa
+
+          # El linker de Xcode 26.6 falla con:
+          #   ld: Assertion failed: "compact unwind compressed function offset doesn't fit in 24 bits"
+          # Se usa un wrapper de "cc" que agrega un flag de linker. Se prueba primero
+          # el linker clásico (conserva el unwind info) y, si no sirve, se desactiva
+          # el compact unwind como último recurso.
+          wrapper="$RUNNER_TEMP/cc-wrapper.sh"
+          built=0
+
+          for flag in "-Wl,-ld_classic" "-Wl,-no_compact_unwind"; do
+            echo "::group::Intento con flag de linker: $flag"
+
+            printf '#!/bin/bash\nexec cc "$@" %s\n' "$flag" > "$wrapper"
+            chmod +x "$wrapper"
+
+            if CARGO_TARGET_AARCH64_APPLE_IOS_LINKER="$wrapper" ./make-ios.sh --ipa; then
+              built=1
+              echo "::endgroup::"
+              echo "Compilación correcta con: $flag"
+              break
+            fi
+
+            echo "::endgroup::"
+            echo "::warning::Falló la compilación con $flag"
+          done
+
+          if [[ "$built" -ne 1 ]]; then
+            echo "::error::Fallaron todos los intentos de linker."
+            exit 1
+          fi
 
           IPA="build/Mush8.ipa"
 
@@ -268,11 +319,29 @@ jobs:
           name: Mush8-iOS-IPA
           path: build/Mush8.ipa
           if-no-files-found: error
-          retention-days: 7
+          # Mínimo permitido: descárgalo y bórralo cuanto antes
+          retention-days: 1
+
+      - name: Borrar artefacto con los NSP (solo si todo salió bien)
+        if: success()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ids="$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+            --jq '.artifacts[] | select(.name == "mush8-build-inputs-${{ github.run_id }}") | .id')"
+
+          for id in $ids; do
+            gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
+            echo "Artefacto de entradas borrado: $id"
+          done
 
       - name: Limpiar archivos locales y claves
         if: always()
         shell: bash
         run: |
           rm -f prod.keys base.nsp upd4-0-1.nsp
-          rm -rf downloads build-inputs game-files
+          rm -rf build-inputs game-files
