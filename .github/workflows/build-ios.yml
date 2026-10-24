@@ -1,41 +1,90 @@
 
-name: Test prod.keys
+name: Mush8 - Diagnostico iOS
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  test:
+  diagnostico:
     runs-on: macos-26
 
     steps:
-      - name: Checkout Mush8
+      - name: Descargar repositorio
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
-      - name: Test prod.keys secret
+      - name: Preparar y comprobar prod.keys
         env:
           PROD_KEYS_BASE64: ${{ secrets.PROD_KEYS_BASE64 }}
         run: |
-          set -eu
+          set -euo pipefail
+          trap 'rm -f prod.keys' EXIT
 
           if [ -z "$PROD_KEYS_BASE64" ]; then
-            echo "::error::El secreto PROD_KEYS_BASE64 está vacío o no existe"
+            echo "::error::El secreto PROD_KEYS_BASE64 esta vacio o no esta disponible."
             exit 1
           fi
 
-          printf '%s' "$PROD_KEYS_BASE64" \
-            | base64 -D > "$RUNNER_TEMP/prod.keys"
+          printf '%s' "$PROD_KEYS_BASE64" | base64 -D > prod.keys
 
-          if [ ! -s "$RUNNER_TEMP/prod.keys" ]; then
-            echo "::error::El archivo decodificado está vacío"
+          if [ ! -s prod.keys ]; then
+            echo "::error::prod.keys no existe o esta vacio."
             exit 1
           fi
 
-          echo "OK: el secreto existe"
-          echo "OK: Base64 se decodificó correctamente"
-          echo "OK: prod.keys tiene contenido"
-          echo "Tamaño: $(wc -c < "$RUNNER_TEMP/prod.keys" | tr -d ' ') bytes"
+          echo "OK: prod.keys se ha creado en la raiz."
+          echo "Tamano: $(wc -c < prod.keys | tr -d ' ') bytes"
 
-          rm -f "$RUNNER_TEMP/prod.keys"
+          if ! grep -Eq '^[[:space:]]*master_key_[[:xdigit:]]{2}[[:space:]]*=' prod.keys; then
+            echo "::error::No se encontro una linea master_key_XX. Revisa que el secreto contenga el prod.keys correcto."
+            exit 1
+          fi
+
+          echo "OK: se encontro al menos una entrada master_key_XX."
+
+      - name: Diagnosticar archivos y rutas
+        run: |
+          set -eu
+
+          echo "Directorio actual:"
+          pwd
+
+          echo ""
+          echo "Script:"
+          test -f make-ios.sh || {
+            echo "::error::No se encuentra make-ios.sh en la raiz."
+            exit 1
+          }
+          echo "OK: make-ios.sh existe."
+
+          echo ""
+          echo "Archivos NSP:"
+          for f in base.nsp upd4-0-1.nsp; do
+            if [ -s "$f" ]; then
+              echo "OK: $f existe y no esta vacio ($(du -h "$f" | cut -f1))."
+            else
+              echo "::error::Falta $f o esta vacio en la raiz."
+            fi
+          done
+
+          echo ""
+          echo "Estado de la extraccion:"
+          if [ -s work/v-upd/exefs/main ]; then
+            echo "OK: existe work/v-upd/exefs/main."
+          else
+            echo "INFO: no existe work/v-upd/exefs/main."
+            echo "La siguiente compilacion necesitara extraer los NSP."
+          fi
+
+          echo ""
+          echo "Rutas utilizadas por make-ios.sh:"
+          grep -nE 'cd .*dirname|nxfs extract|PATCHED=|IPA=' make-ios.sh
+
+          echo ""
+          echo "Fin del diagnostico. No se ha ejecutado ninguna compilacion."
+
+      - name: Eliminar claves
+        if: always()
+        run: rm -f prod.keys
