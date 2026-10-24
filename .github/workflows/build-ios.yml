@@ -1,5 +1,4 @@
-
-name: Mush8 - Diagnostico iOS
+name: Mush8 - Compilar IPA iOS
 
 on:
   workflow_dispatch:
@@ -7,84 +6,171 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: mush8-ios-build
+  cancel-in-progress: false
+
 jobs:
-  diagnostico:
+  build:
+    name: Descargar, verificar y compilar
     runs-on: macos-26
+    timeout-minutes: 360
 
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Preparar y comprobar prod.keys
+      - name: Descargar NSP desde el VPS
         env:
-          PROD_KEYS_BASE64: ${{ secrets.PROD_KEYS_BASE64 }}
+          TRANSFER_USER: ${{ secrets.TRANSFER_USER }}
+          TRANSFER_PASS: ${{ secrets.TRANSFER_PASS }}
+          TRANSFER_BASE_URL: ${{ secrets.TRANSFER_BASE_URL }}
+        shell: bash
         run: |
           set -euo pipefail
-          trap 'rm -f prod.keys' EXIT
+          mkdir -p downloads
 
-          if [ -z "$PROD_KEYS_BASE64" ]; then
-            echo "::error::El secreto PROD_KEYS_BASE64 esta vacio o no esta disponible."
+          for file in baseGame.nsp update401.nsp; do
+            echo "::group::Descargando $file"
+
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --location \
+              --connect-timeout 30 \
+              --max-time 7200 \
+              --retry 5 \
+              --retry-delay 10 \
+              --retry-all-errors \
+              --user "$TRANSFER_USER:$TRANSFER_PASS" \
+              --output "downloads/$file" \
+              "${TRANSFER_BASE_URL%/}/$file"
+
+            test -s "downloads/$file"
+            echo "Descarga completada: $file"
+            echo "::endgroup::"
+          done
+
+      - name: Verificar SHA-256
+        env:
+          SHA256_BASEGAME: ${{ secrets.SHA256_BASEGAME }}
+          SHA256_UPDATE401: ${{ secrets.SHA256_UPDATE401 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          verify_sha256() {
+            local file="$1"
+            local expected="$2"
+            local actual
+
+            if [[ ! "$expected" =~ ^[a-fA-F0-9]{64}$ ]]; then
+              echo "::error::El SHA-256 esperado de $file no es válido."
+              exit 1
+            fi
+
+            actual="$(shasum -a 256 "downloads/$file" | awk '{print $1}')"
+
+            if [[ "${actual,,}" != "${expected,,}" ]]; then
+              echo "::error::SHA-256 incorrecto para $file"
+              exit 1
+            fi
+
+            echo "SHA-256 correcto: $file"
+          }
+
+          verify_sha256 baseGame.nsp "$SHA256_BASEGAME"
+          verify_sha256 update401.nsp "$SHA256_UPDATE401"
+
+      - name: Preparar archivos del juego y claves
+        env:
+          PROD_KEYS_BASE64: ${{ secrets.PROD_KEYS_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+
+          if [[ -z "$PROD_KEYS_BASE64" ]]; then
+            echo "::error::Falta el secreto PROD_KEYS_BASE64."
             exit 1
           fi
 
           printf '%s' "$PROD_KEYS_BASE64" | base64 -D > prod.keys
 
-          if [ ! -s prod.keys ]; then
-            echo "::error::prod.keys no existe o esta vacio."
+          if [[ ! -s prod.keys ]] ||
+             ! grep -Eq '^[[:space:]]*master_key_[[:xdigit:]]{2}[[:space:]]*=' prod.keys; then
+            echo "::error::prod.keys no es válido o no tiene el formato esperado."
             exit 1
           fi
 
-          echo "OK: prod.keys se ha creado en la raiz."
-          echo "Tamano: $(wc -c < prod.keys | tr -d ' ') bytes"
+          cp downloads/baseGame.nsp base.nsp
+          cp downloads/update401.nsp upd4-0-1.nsp
 
-          if ! grep -Eq '^[[:space:]]*master_key_[[:xdigit:]]{2}[[:space:]]*=' prod.keys; then
-            echo "::error::No se encontro una linea master_key_XX. Revisa que el secreto contenga el prod.keys correcto."
-            exit 1
-          fi
+          test -s base.nsp
+          test -s upd4-0-1.nsp
 
-          echo "OK: se encontro al menos una entrada master_key_XX."
+          echo "Archivos preparados correctamente."
 
-      - name: Diagnosticar archivos y rutas
+      - name: Instalar dependencias
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
 
-          echo "Directorio actual:"
-          pwd
+          xcodebuild -version
+          sudo xcodebuild -license accept
 
-          echo ""
-          echo "Script:"
-          test -f make-ios.sh || {
-            echo "::error::No se encuentra make-ios.sh en la raiz."
+          brew install xcodegen cmake pkgconf rustup
+
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "/opt/homebrew/opt/rustup/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Configurar Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
+
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
+          rustup target add aarch64-apple-ios --toolchain 1.98.1
+
+          rustc --version
+          cargo --version
+          xcodegen --version
+
+      - name: Compilar Mush8
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: always
+        run: |
+          set -euo pipefail
+
+          chmod +x make-ios.sh
+          ./make-ios.sh --ipa
+
+          if [[ ! -s build/Mush8.ipa ]]; then
+            echo "::error::La compilación terminó sin generar build/Mush8.ipa."
             exit 1
-          }
-          echo "OK: make-ios.sh existe."
-
-          echo ""
-          echo "Archivos NSP:"
-          for f in base.nsp upd4-0-1.nsp; do
-            if [ -s "$f" ]; then
-              echo "OK: $f existe y no esta vacio ($(du -h "$f" | cut -f1))."
-            else
-              echo "::error::Falta $f o esta vacio en la raiz."
-            fi
-          done
-
-          echo ""
-          echo "Estado de la extraccion:"
-          if [ -s work/v-upd/exefs/main ]; then
-            echo "OK: existe work/v-upd/exefs/main."
-          else
-            echo "INFO: no existe work/v-upd/exefs/main."
-            echo "La siguiente compilacion necesitara extraer los NSP."
           fi
 
-          echo ""
-          echo "Rutas utilizadas por make-ios.sh:"
-          grep -nE 'cd .*dirname|nxfs extract|PATCHED=|IPA=' make-ios.sh
+          echo "IPA generado correctamente:"
+          ls -lh build/Mush8.ipa
 
-          echo ""
-          echo "Fin del diagnostico. No se ha ejecutado ninguna compilacion."
+      - name: Publicar IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mush8-iOS-IPA
+          path: build/Mush8.ipa
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Eliminar claves
+      - name: Limpiar claves y archivos descargados
         if: always()
-        run: rm -f prod.keys
+        shell: bash
+        run: |
+          rm -f prod.keys
+          rm -f base.nsp upd4-0-1.nsp
+          rm -rf downloads
