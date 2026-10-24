@@ -77,6 +77,7 @@ jobs:
             echo "::endgroup::"
           done
 
+
       - name: Verificar SHA-256
         env:
           SHA256_BASEGAME: ${{ secrets.SHA256_BASEGAME }}
@@ -98,7 +99,11 @@ jobs:
 
             actual="$(shasum -a 256 "downloads/$file" | awk '{print $1}')"
 
-            if [[ "${actual,,}" != "${expected,,}" ]]; then
+            # Convertir ambos hashes a minúsculas.
+            actual="$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')"
+            expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
+
+            if [[ "$actual" != "$expected" ]]; then
               echo "::error::SHA-256 incorrecto para $file."
               exit 1
             fi
