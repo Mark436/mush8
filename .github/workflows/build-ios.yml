@@ -1,3 +1,4 @@
+
 name: Mush8 - Compilar IPA iOS
 
 on:
@@ -17,7 +18,7 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Descargar repositorio
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Descargar archivos desde el VPS
@@ -48,7 +49,7 @@ jobs:
               "${TRANSFER_BASE_URL%/}/$file"
 
             test -s "downloads/$file"
-            echo "Descarga completada: $file"
+            echo "Descarga correcta: $file"
             echo "::endgroup::"
           done
 
@@ -67,7 +68,7 @@ jobs:
             local actual
 
             if [[ ! "$expected" =~ ^[a-fA-F0-9]{64}$ ]]; then
-              echo "::error::El SHA-256 esperado de $file no es válido."
+              echo "::error::SHA-256 ausente o inválido para $file"
               exit 1
             fi
 
@@ -85,7 +86,7 @@ jobs:
           verify_sha256 update401.nsp "$SHA256_UPDATE401"
           verify_sha256 dlc.nsp "$SHA256_DLC"
 
-      - name: Preparar archivos del juego y claves
+      - name: Preparar NSP y claves
         env:
           PROD_KEYS_BASE64: ${{ secrets.PROD_KEYS_BASE64 }}
         shell: bash
@@ -94,7 +95,7 @@ jobs:
           umask 077
 
           if [[ -z "$PROD_KEYS_BASE64" ]]; then
-            echo "::error::Falta el secreto PROD_KEYS_BASE64."
+            echo "::error::Falta el secreto PROD_KEYS_BASE64"
             exit 1
           fi
 
@@ -102,19 +103,26 @@ jobs:
 
           if [[ ! -s prod.keys ]] ||
              ! grep -Eq '^[[:space:]]*master_key_[[:xdigit:]]{2}[[:space:]]*=' prod.keys; then
-            echo "::error::prod.keys no es válido o no tiene el formato esperado."
+            echo "::error::prod.keys está vacío o no tiene el formato esperado"
             exit 1
           fi
 
+          # Nombres que espera make-ios.sh.
           cp downloads/baseGame.nsp base.nsp
           cp downloads/update401.nsp upd4-0-1.nsp
-          cp downloads/dlc.nsp dlc.nsp
+
+          # El DLC se conserva para importarlo en la aplicación instalada.
+          mkdir -p game-files
+          cp base.nsp game-files/base.nsp
+          cp upd4-0-1.nsp game-files/upd4-0-1.nsp
+          cp downloads/dlc.nsp game-files/dlc.nsp
 
           test -s base.nsp
           test -s upd4-0-1.nsp
-          test -s dlc.nsp
+          test -s game-files/dlc.nsp
 
-          echo "Archivos preparados correctamente."
+          echo "Archivos preparados."
+          ls -lh base.nsp upd4-0-1.nsp game-files/
 
       - name: Instalar dependencias
         shell: bash
@@ -145,7 +153,7 @@ jobs:
           cargo --version
           xcodegen --version
 
-      - name: Compilar Mush8
+      - name: Compilar Mush8 para iOS
         shell: bash
         env:
           CARGO_TERM_COLOR: always
@@ -155,11 +163,9 @@ jobs:
           chmod +x make-ios.sh
           ./make-ios.sh --ipa
 
-          if [[ ! -s build/Mush8.ipa ]]; then
-            echo "::error::No se generó build/Mush8.ipa."
-            exit 1
-          fi
+          test -s build/Mush8.ipa
 
+          echo "IPA generado:"
           ls -lh build/Mush8.ipa
 
       - name: Publicar IPA
@@ -170,10 +176,18 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Limpiar archivos sensibles y descargados
+      - name: Publicar archivos del juego
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mush8-Game-Files
+          path: game-files/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Limpiar claves y archivos temporales
         if: always()
         shell: bash
         run: |
           rm -f prod.keys
-          rm -f base.nsp upd4-0-1.nsp dlc.nsp
-          rm -rf downloads
+          rm -f base.nsp upd4-0-1.nsp
+          rm -rf downloads game-files
